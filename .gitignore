@@ -1,0 +1,13 @@
+.env
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.idea/
+.vscode/
+server_outputs/
+.test_db.sqlite3
+*.sqlite3
+dist/
+build/
+*.spec.bak

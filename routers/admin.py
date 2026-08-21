@@ -1,0 +1,93 @@
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+
+from billing_service import list_action_rates, set_action_rate, set_user_credits
+from database import get_db
+from dependencies import require_admin
+from models import User, UserList
+from schemas import (
+    ActionRateResponse,
+    ActionRateUpdate,
+    AdminCreditUpdate,
+    AdminUserResponse,
+)
+
+router = APIRouter(prefix="/admin", tags=["admin"])
+
+
+@router.get("/users", response_model=list[AdminUserResponse])
+def list_users(admin: User = Depends(require_admin), db: Session = Depends(get_db)):
+    users = db.query(User).order_by(User.created_at.desc()).all()
+    result = []
+    for user in users:
+        list_count = db.query(UserList).filter(UserList.user_id == user.id).count()
+        result.append(
+            AdminUserResponse(
+                id=user.id,
+                email=user.email,
+                phone_number=user.phone_number,
+                credits=float(user.credits),
+                status=user.status.value,
+                role=user.role.value,
+                list_count=list_count,
+            )
+        )
+    return result
+
+
+@router.patch("/users/{user_id}/credits", response_model=AdminUserResponse)
+def update_user_credits(
+    user_id: UUID,
+    payload: AdminCreditUpdate,
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    if payload.credits is None and payload.delta is None:
+        raise HTTPException(status_code=400, detail="Provide credits or delta")
+
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    try:
+        updated = set_user_credits(
+            db,
+            user,
+            credits=payload.credits,
+            delta=payload.delta,
+            note=payload.note or f"Updated by {admin.email}",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    list_count = db.query(UserList).filter(UserList.user_id == user.id).count()
+    return AdminUserResponse(
+        id=updated.id,
+        email=updated.email,
+        phone_number=updated.phone_number,
+        credits=float(updated.credits),
+        status=updated.status.value,
+        role=updated.role.value,
+        list_count=list_count,
+    )
+
+
+@router.get("/billing", response_model=list[ActionRateResponse])
+def admin_list_billing(admin: User = Depends(require_admin), db: Session = Depends(get_db)):
+    return [ActionRateResponse(**item) for item in list_action_rates(db)]
+
+
+@router.put("/billing", response_model=ActionRateResponse)
+def admin_update_billing(
+    payload: ActionRateUpdate,
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    try:
+        set_action_rate(db, payload.task_type, payload.rate)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    catalog = {item["task_type"]: item for item in list_action_rates(db)}
+    return ActionRateResponse(**catalog[payload.task_type])

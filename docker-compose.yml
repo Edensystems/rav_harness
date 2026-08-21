@@ -1,0 +1,23 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: odibets_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: odibets
+    ports:
+      - "5432:5432"
+    volumes:
+      - odibets_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d odibets"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  odibets_pg_data:
