@@ -740,6 +740,34 @@ def process_single_user(
                 log_func(f"FAILED (Bet): {target_number} | {err}")
 
             _write_output(output_filename, result_line)
+        elif task_type == "streak":
+            selections_url = "https://odibets.com:443/pxy2/streaks"
+            bet_headers = {
+                "Authorization": f"Bearer {auth_details['access_token']}",
+                "User-Agent": auth_details["ua"],
+                "Accept": "application/json, text/plain, */*",
+                "Content-Type": "application/json",
+                "Referer": "https://odibets.com/account",
+            }
+            resp_selections = requests.get(
+                selections_url, headers=bet_headers, cookies=auth_details["cookies"], timeout=TIMEOUT
+            )
+            resp_selections.raise_for_status()
+            selections_data = resp_selections.json()
+
+            if selections_data.get("status_code") != 200:
+                error_msg = selections_data.get("message", "Could not retrieve selections from share code")
+                log_func(f"FAILED (Claim Bonus): {target_number} | {error_msg}")
+                return
+
+            selection = selections_data["data"]["current_streak"] 
+            result_line = f"{target_number} Streak: {selection} \n"
+            log_func(f"SUCCESS (Streak): {target_number} | Streak: {selection}")
+            _write_output(output_filename, result_line)
+            if job is not None:
+                _apply_success_charge(job, task_type, target_number, log_func)
+    
+
 
         elif task_type == "claim_bonus":
             selections_url = (
