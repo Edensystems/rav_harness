@@ -33,11 +33,11 @@ def bundled_dir() -> Path:
 
 def load_automation_identity() -> AutomationIdentity:
     return AutomationIdentity(
-        id=os.getenv("AUTOMATION_ID", "odibets-automation"),
-        name=os.getenv("AUTOMATION_NAME", "Batting Automation Assistant"),
+        id=os.getenv("AUTOMATION_ID", "Betting-automation"),
+        name=os.getenv("AUTOMATION_NAME", "Betting Automation Assistant"),
         description=os.getenv(
             "AUTOMATION_DESCRIPTION",
-            "Account management, batch operations, and server-side execution control center.",
+            "Account management, batch operations, and execution control center.",
         ),
         environment=os.getenv("AUTOMATION_ENV", "production"),
     )

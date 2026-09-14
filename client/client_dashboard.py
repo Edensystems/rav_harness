@@ -27,15 +27,27 @@ QUICK_ACTIONS = (
     ("Check balances", "balance"),
     ("Place bets", "bet"),
     ("Claim bonus", "claim_bonus"),
+    ("Check streaks", "streak"),
+    ("Withdrawal", "withdrawal"),
+    ("Cashout", "cashout"),
+    ("Virtual bet", "virtual_bet"),
+    ("Rollover", "rollover"),
 )
 
 SHARE_CODE_ACTIONS = {"bet", "claim_bonus"}
-AMOUNT_ACTIONS = {"bet"}
+AMOUNT_ACTIONS = {"bet", "virtual_bet", "rollover", "withdrawal"}
+AMOUNT_OPTION_ACTIONS = {"bet", "virtual_bet", "rollover"}
+BET_ID_ACTIONS = {"cashout"}
 
 ACTION_HELP = {
     "balance": "Check the available balance for every account in the selected batch.",
     "bet": "Place the booking-code bet for each eligible account.",
     "claim_bonus": "Claim the configured bonus for eligible accounts.",
+    "streak": "Check the available streak for every account in the selected batch.",
+    "withdrawal": "Withdraw the entered amount for every account in the selected batch.",
+    "cashout": "Cash out open bets. Bet ID is optional; leave it blank to cash out all eligible bets.",
+    "virtual_bet": "Place the virtual arbitrage bet for each eligible account.",
+    "rollover": "Split the batch across a balanced virtual market and place rollover bets.",
 }
 
 LEVEL_COLORS = {
@@ -235,7 +247,7 @@ class DashboardBuilder:
         scale = max(0.78, min(raw_scale, 1.25))
         scale = round(scale / 0.05) * 0.05
         mode = "wide" if width >= 1040 else "compact"
-        action_columns = 3 if width >= 760 else 1
+        action_columns = 4 if width >= 1100 else 2 if width >= 760 else 1
         signature = f"{mode}:{action_columns}:{scale:.2f}"
         if signature == self._layout_mode:
             return
@@ -281,7 +293,7 @@ class DashboardBuilder:
                 self.monitor_panel.rowconfigure(row, weight=1)
                 card.grid(row=row, column=0, sticky="nsew", pady=(0, 8 if row < 2 else 0))
 
-        for column in range(3):
+        for column in range(4):
             self.action_grid.columnconfigure(column, weight=1 if column < action_columns else 0)
         for index, button in enumerate(self.action_button_order):
             button.configure(
@@ -419,9 +431,7 @@ class DashboardBuilder:
         self.last_refresh_var = tk.StringVar(value="Stats not loaded yet")
         self.scale_var = tk.StringVar(value="UI size: 100%")
 
-        tk.Label(meta, text=env_text, bg=TOKENS["background"], fg=TOKENS["text_muted"], font=TOKENS["font_ui_sm"]).pack(
-            side="left", padx=(0, 16)
-        )
+        
         tk.Label(meta, textvariable=self.user_meta_var, bg=TOKENS["background"], fg=TOKENS["text_muted"], font=TOKENS["font_ui_sm"]).pack(
             side="left", padx=(0, 16)
         )
@@ -434,7 +444,10 @@ class DashboardBuilder:
             padx=8,
             pady=2,
         )
-        self.credits_label.pack(side="left", padx=(0, 16))
+        self.credits_label.pack(side="left", padx=(0, 8))
+        create_flat_button(meta, "Add credits", self.app.open_add_credits, variant="primary").pack(
+            side="left", padx=(0, 16)
+        )
         tk.Label(meta, text="Status:", bg=TOKENS["background"], fg=TOKENS["text_muted"], font=TOKENS["font_ui_sm"]).pack(
             side="left"
         )
@@ -447,13 +460,12 @@ class DashboardBuilder:
         tk.Label(meta, textvariable=self.last_refresh_var, bg=TOKENS["background"], fg=TOKENS["text_muted"], font=TOKENS["font_ui_sm"]).pack(
             side="left"
         )
-        tk.Label(meta, textvariable=self.scale_var, bg=TOKENS["background"], fg=TOKENS["text_muted"], font=TOKENS["font_ui_sm"]).pack(
-            side="left", padx=(16, 0)
-        )
+        
 
         actions = tk.Frame(header, bg=TOKENS["background"])
         actions.grid(row=0, column=1, sticky="e")
         self.header_actions = actions
+        create_flat_button(actions, "Add credits", self.app.open_add_credits, variant="primary").pack(side="left", padx=4)
         create_flat_button(actions, "Refresh dashboard", self.refresh_stats, variant="secondary").pack(side="left", padx=4)
         create_flat_button(actions, "View activity", lambda: self.show_section("activity"), variant="primary").pack(side="left")
 
@@ -691,15 +703,14 @@ class DashboardBuilder:
         self.app.share_code_entry = themed_entry(input_card, width=30)
         self.app.share_code_entry.grid(row=5, column=1, padx=8, columnspan=3, sticky="ew")
 
-        label("Connections", 6)
-        self.app.connections_entry = themed_entry(input_card, width=12)
-        self.app.connections_entry.insert(0, "3")
-        self.app.connections_entry.grid(row=6, column=1, padx=8, sticky="w")
-
-        self.amount_label = label("Amount", 7)
+        self.amount_label = label("Amount", 6)
         self.app.amount_entry = themed_entry(input_card, width=12)
-        self.app.amount_entry.grid(row=7, column=1, padx=8, sticky="w")
+        self.app.amount_entry.grid(row=6, column=1, padx=8, sticky="w")
         input_card.columnconfigure(1, weight=1)
+
+        self.bet_id_label = label("Bet ID (optional)", 7)
+        self.app.bet_id_entry = themed_entry(input_card, width=30)
+        self.app.bet_id_entry.grid(row=7, column=1, padx=8, columnspan=3, sticky="ew")
 
         self.option_card = create_card(input_card, padx=10, pady=8, highlight=True)
         self.option_card.grid(row=8, column=0, columnspan=4, sticky="ew", pady=(8, 0))
@@ -760,7 +771,7 @@ class DashboardBuilder:
         grid = tk.Frame(actions_card, bg=TOKENS["surface_2"])
         grid.pack(fill="x")
         self.action_grid = grid
-        for column in range(3):
+        for column in range(4):
             grid.columnconfigure(column, weight=1)
 
         defs = [
@@ -779,7 +790,7 @@ class DashboardBuilder:
                 variant=variant,
                 width=18,
             )
-            btn.grid(row=idx // 3, column=idx % 3, padx=2, pady=2, sticky="ew")
+            btn.grid(row=idx // 4, column=idx % 4, padx=2, pady=2, sticky="ew")
             self.app.action_buttons.append(btn)
             self.action_button_order.append(btn)
             self.action_button_map[task_type] = btn
@@ -792,7 +803,7 @@ class DashboardBuilder:
             self.app.password_entry,
             self.app.share_code_entry,
             self.app.amount_entry,
-            self.app.connections_entry,
+            self.app.bet_id_entry,
         ]
 
         run_card = create_card(scroll_body, padx=10, pady=8, highlight=True)
@@ -970,16 +981,22 @@ class DashboardBuilder:
 
         requires_share_code = task_type in SHARE_CODE_ACTIONS
         requires_amount = task_type in AMOUNT_ACTIONS
+        requires_amount_options = task_type in AMOUNT_OPTION_ACTIONS
+        requires_bet_id = task_type in BET_ID_ACTIONS
         required_extras = []
         if requires_share_code:
             required_extras.append("booking code")
         if requires_amount:
-            required_extras.append("amount options")
+            required_extras.append("amount")
+        if requires_bet_id:
+            required_extras.append("optional bet ID")
         requirement = f" Additional details: {', '.join(required_extras)}." if required_extras else " No additional details required."
         billing_note = self._billing_help(task_type)
-        self.action_requirement_var.set(f"{ACTION_HELP.get(task_type, '')}{requirement}{billing_note}")
+        availability_note = "" if self.app.is_action_enabled(task_type) else " This action is currently disabled by the server."
+        self.action_requirement_var.set(f"{ACTION_HELP.get(task_type, '')}{requirement}{billing_note}{availability_note}")
         self.share_code_label.configure(text="Share / booking code *")
         self.amount_label.configure(text="Amount *")
+        self.bet_id_label.configure(text="Bet ID (optional)")
         run_label = f"Run {label.lower()}"
         if self.app.is_billable(task_type):
             run_label = f"{run_label} · {self._format_credits(self.app.action_rate(task_type))} cr each"
@@ -990,18 +1007,35 @@ class DashboardBuilder:
             (widget.grid if requires_share_code else widget.grid_remove)()
         for widget in (self.amount_label, self.app.amount_entry):
             (widget.grid if requires_amount else widget.grid_remove)()
+        for widget in (self.bet_id_label, self.app.bet_id_entry):
+            (widget.grid if requires_bet_id else widget.grid_remove)()
 
-        if requires_amount:
+        if requires_amount_options:
             self.option_card.grid()
         else:
             self.option_card.grid_remove()
 
-        for action, button in self.action_button_map.items():
-            selected = action == task_type
+        self._style_action_buttons()
+
+    def _style_action_buttons(self) -> None:
+        selected = getattr(self, "selected_task_type", "balance")
+        running = bool(self.app.is_running)
+        for action, button in getattr(self, "action_button_map", {}).items():
+            enabled = self.app.is_action_enabled(action)
+            is_selected = action == selected
+            base = self.action_base_labels.get(action, action)
+            item = (self.app.billing_rates or {}).get(action) or {}
+            label = base
+            if item.get("billable") or float(item.get("rate") or 0) > 0:
+                label = f"{base}  ·  {self._format_credits(item.get('rate'))} cr"
+            if not enabled:
+                label = f"{base}  ·  off"
             button.configure(
-                bg=TOKENS["accent_primary"] if selected else TOKENS["surface_elevated"],
-                fg=TOKENS["on_accent"] if selected else TOKENS["text_secondary"],
-                highlightbackground=TOKENS["focus_ring"] if selected else TOKENS["surface_elevated"],
+                text=label,
+                state=tk.DISABLED if running or not enabled else tk.NORMAL,
+                bg=TOKENS["accent_primary"] if is_selected and enabled else TOKENS["surface_elevated"],
+                fg=TOKENS["on_accent"] if is_selected and enabled else TOKENS["text_muted"] if not enabled else TOKENS["text_secondary"],
+                highlightbackground=TOKENS["focus_ring"] if is_selected and enabled else TOKENS["surface_elevated"],
                 highlightthickness=1,
             )
 
@@ -1040,16 +1074,10 @@ class DashboardBuilder:
 
     def apply_billing_rates(self, rates: dict) -> None:
         self.app.billing_rates = rates
-        for task_type, button in getattr(self, "action_button_map", {}).items():
-            base = self.action_base_labels.get(task_type, task_type)
-            item = rates.get(task_type) or {}
-            if item.get("billable") or float(item.get("rate") or 0) > 0:
-                button.configure(text=f"{base}  ·  {self._format_credits(item.get('rate'))} cr")
-            else:
-                button.configure(text=base)
         if hasattr(self, "selected_task_type"):
             self._select_action(self.selected_task_type)
         else:
+            self._style_action_buttons()
             self.refresh_action_affordability()
 
     def apply_job_billing(self, charged, remaining) -> None:
@@ -1071,11 +1099,12 @@ class DashboardBuilder:
         if self.app.is_running:
             return
         task_type = getattr(self, "selected_task_type", "balance")
-        can_run = True
-        if self.app.is_billable(task_type):
+        can_run = self.app.is_action_enabled(task_type)
+        if can_run and self.app.is_billable(task_type):
             can_run = self.app.current_credits() >= self.app.action_rate(task_type)
         if hasattr(self, "primary_run_button"):
             self.primary_run_button.configure(state=tk.NORMAL if can_run else tk.DISABLED)
+        self._style_action_buttons()
 
     def update_progress(self, processed: int, total: int, status: str = "running", stage: str = "Processing items") -> None:
         total = max(total, 0)
@@ -1178,6 +1207,7 @@ class DashboardBuilder:
 
     def _schedule_connection_poll(self) -> None:
         self.refresh_connection()
+        self.app.refresh_billing()
         self.app.root.after(30000, self._schedule_connection_poll)
 
     def _schedule_stats_poll(self) -> None:

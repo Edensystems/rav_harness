@@ -117,8 +117,9 @@ class TaskPayload(BaseModel):
     amount: str = ""
     use_bonus: bool = False
     use_total_balance: bool = False
-    connections: int = 3
+    connections: int = Field(default=0, ge=0, le=50)
     output_filename: str = ""
+    bet_id: str = ""
 
 
 class ActionRateResponse(BaseModel):
@@ -126,6 +127,7 @@ class ActionRateResponse(BaseModel):
     label: str
     rate: float
     billable: bool
+    enabled: bool = True
 
 
 class BillingCatalogResponse(BaseModel):
@@ -142,3 +144,51 @@ class AdminCreditUpdate(BaseModel):
     credits: float | None = Field(default=None, ge=0, le=1000000)
     delta: float | None = Field(default=None, ge=-1000000, le=1000000)
     note: str = Field(default="Admin credit update", max_length=255)
+
+
+class TaskConnectionsUpdate(BaseModel):
+    connections: int = Field(ge=1, le=50)
+
+
+class TaskConnectionsResponse(BaseModel):
+    connections: int
+
+
+class ActionToggleUpdate(BaseModel):
+    task_type: str = Field(min_length=1, max_length=64)
+    enabled: bool
+
+
+class PaymentCryptoResponse(BaseModel):
+    coin: str
+    network: str
+    address: str
+    configured: bool
+
+
+class PaymentWhatsAppResponse(BaseModel):
+    number: str
+    message: str
+    url: str
+    configured: bool
+
+
+class PaymentOptionsResponse(BaseModel):
+    crypto: PaymentCryptoResponse
+    whatsapp: PaymentWhatsAppResponse
+
+
+class PaymentSettingsUpdate(BaseModel):
+    crypto_coin: str | None = Field(default=None, max_length=32)
+    crypto_network: str | None = Field(default=None, max_length=32)
+    crypto_address: str | None = Field(default=None, max_length=256)
+    whatsapp_number: str | None = Field(default=None, max_length=32)
+    whatsapp_message: str | None = Field(default=None, max_length=500)
+
+
+class PaymentSettingsResponse(BaseModel):
+    crypto_coin: str
+    crypto_network: str
+    crypto_address: str
+    whatsapp_number: str
+    whatsapp_message: str

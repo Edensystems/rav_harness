@@ -8,6 +8,7 @@ hidden = [
     "client_config",
     "client_dashboard",
     "client_device",
+    "client_payments_ui",
     "client_theme",
     "requests",
     "urllib3",

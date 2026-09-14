@@ -22,6 +22,9 @@ KNOWN_ACTIONS = (
     "claim_bonus",
     "claim",
     "save_token",
+    "streak",
+    "withdrawal",
+    "cashout",
 )
 
 ACTION_LABELS = {
@@ -33,6 +36,9 @@ ACTION_LABELS = {
     "claim_bonus": "Claim Bonus",
     "claim": "Claim Winnings",
     "save_token": "Save Tokens",
+    "streak": "Check Streaks",
+    "withdrawal": "Withdrawal",
+    "cashout": "Cashout",
 }
 
 DEFAULT_RATES = {
@@ -44,6 +50,9 @@ DEFAULT_RATES = {
     "claim_bonus": "0",
     "claim": "0",
     "save_token": "0",
+    "streak": "0",
+    "withdrawal": "0",
+    "cashout": "0",
 }
 
 
@@ -87,8 +96,12 @@ def get_action_rate(db: Session, task_type: str) -> Decimal:
 
 
 def list_action_rates(db: Session) -> list[dict]:
+    from action_service import action_enabled_map, seed_action_toggles
+
     seed_action_rates(db)
+    seed_action_toggles(db)
     rows = {row.task_type: row for row in db.query(ActionRate).all()}
+    enabled = action_enabled_map(db)
     catalog = []
     for task_type in KNOWN_ACTIONS:
         rate = to_credits(rows[task_type].rate) if task_type in rows else to_credits(DEFAULT_RATES[task_type])
@@ -98,6 +111,7 @@ def list_action_rates(db: Session) -> list[dict]:
                 "label": ACTION_LABELS.get(task_type, task_type),
                 "rate": float(rate),
                 "billable": rate > 0,
+                "enabled": bool(enabled.get(task_type, True)),
             }
         )
     return catalog

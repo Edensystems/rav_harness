@@ -9,8 +9,11 @@ from bs4 import BeautifulSoup
 import threading
 import os
 
+from action_service import is_action_enabled
 from auth_service import seed_admin_user
+from config import get_task_connections
 from billing_service import (
+    KNOWN_ACTIONS,
     charge_successful_action,
     format_credits,
     get_action_rate,
@@ -37,6 +40,9 @@ async def lifespan(app: FastAPI):
     try:
         seed_admin_user(db)
         seed_action_rates(db)
+        from action_service import seed_action_toggles
+
+        seed_action_toggles(db)
     finally:
         db.close()
     yield
@@ -61,6 +67,8 @@ def _validate_task_payload(payload: TaskPayload):
         raise HTTPException(status_code=400, detail="No target numbers provided")
     if payload.task_type in {"bet", "app_bonus", "claim_bonus"} and not payload.share_code:
         raise HTTPException(status_code=400, detail=f"Share code required for '{payload.task_type}'")
+    if payload.task_type == "withdrawal" and not payload.amount:
+        raise HTTPException(status_code=400, detail="Amount required for 'withdrawal'")
     needs_amount = {"bet", "virtual_bet", "app_bonus", "rollover", "claim"}
     if payload.task_type in needs_amount and not payload.use_total_balance and not payload.amount:
         raise HTTPException(status_code=400, detail=f"Bet amount required for '{payload.task_type}'")
@@ -73,6 +81,14 @@ def start_task(
     db: Session = Depends(get_db),
 ):
     _validate_task_payload(payload)
+
+    if payload.task_type not in KNOWN_ACTIONS:
+        raise HTTPException(status_code=400, detail=f"Unknown action '{payload.task_type}'")
+    if not is_action_enabled(db, payload.task_type):
+        raise HTTPException(
+            status_code=423,
+            detail=f"'{payload.task_type}' is currently disabled by the server.",
+        )
 
     billing_rate = get_action_rate(db, payload.task_type)
     current_credits = float(user.credits)
@@ -104,6 +120,7 @@ def start_task(
         total=len(payload.target_numbers),
     )
 
+    workers = get_task_connections()
     billing_note = (
         f"Billable action: {format_credits(billing_rate)} credit(s) per success. "
         f"Current balance: {format_credits(current_credits)}."
@@ -115,6 +132,7 @@ def start_task(
         "logs": [
             f"Task '{payload.task_type}' initialized by {user.email}. "
             f"Output will be saved to {output_filename}",
+            f"Using {workers} server connection(s) from TASK_CONNECTIONS.",
             billing_note,
         ],
         "processed": 0,
@@ -128,6 +146,7 @@ def start_task(
         "credits_charged": 0.0,
         "credits_remaining": current_credits,
         "billable": billing_rate > 0,
+        "connections": workers,
     }
 
     background_tasks.add_task(run_automation_engine, job_id, payload, output_filename)
@@ -138,6 +157,7 @@ def start_task(
         "billable": billing_rate > 0,
         "billing_rate": float(billing_rate),
         "credits": current_credits,
+        "connections": workers,
     }
 
 
@@ -243,10 +263,13 @@ def run_automation_engine(job_id: str, payload: TaskPayload, output_filename: st
 
     start_time = datetime.now()
 
+    workers = get_task_connections()
+    log(f"Worker pool size: {workers}")
+
     if payload.task_type == "rollover":
         _run_rollover_engine(job_id, job, payload, output_filename, log)
     else:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=payload.connections) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {
                 executor.submit(
                     process_single_user,
@@ -301,7 +324,9 @@ def _run_rollover_engine(job_id: str, job: dict, payload: TaskPayload, output_fi
     list2 = user_list[half_point:]
     log(f"Splitting {len(user_list)} users into two groups: {len(list1)} and {len(list2)}.")
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=payload.connections) as executor:
+    workers = get_task_connections()
+    log(f"Worker pool size: {workers}")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
         futures = []
         for url in list1:
             futures.append(
@@ -756,12 +781,16 @@ def process_single_user(
             selections_data = resp_selections.json()
 
             if selections_data.get("status_code") != 200:
-                error_msg = selections_data.get("message", "Could not retrieve selections from share code")
-                log_func(f"FAILED (Claim Bonus): {target_number} | {error_msg}")
+                error_msg = selections_data.get("message", "Could not retrieve streak")
+                log_func(f"FAILED (Streak): {target_number} | {error_msg}")
                 return
 
-            selection = selections_data["data"]["current_streak"] 
-            result_line = f"{target_number} Streak: {selection} \n"
+            selection = (selections_data.get("data") or {}).get("current_streak")
+            if selection is None:
+                log_func(f"FAILED (Streak): {target_number} | No streak available")
+                return
+
+            result_line = f"{target_number} Streak: {selection}\n"
             log_func(f"SUCCESS (Streak): {target_number} | Streak: {selection}")
             _write_output(output_filename, result_line)
             if job is not None:
@@ -1081,6 +1110,18 @@ def process_single_user(
             _write_output(output_filename, result_line)
             if job is not None and _looks_like_success(bet_status_desc):
                 _apply_success_charge(job, task_type, target_number, log_func)
+
+        elif task_type == "withdrawal":
+            stake = payload.amount
+            result_line = f"{target_number} Withdrawal: {stake} | pending implementation\n"
+            log_func(f"SKELETON (Withdrawal): {target_number} | amount={stake}")
+            _write_output(output_filename, result_line)
+
+        elif task_type == "cashout":
+            bet_id = (payload.bet_id or "").strip() or "all"
+            result_line = f"{target_number} Cashout: {bet_id} | pending implementation\n"
+            log_func(f"SKELETON (Cashout): {target_number} | bet_id={bet_id}")
+            _write_output(output_filename, result_line)
 
         else:
             log_func(f"Unknown task type: {task_type}")

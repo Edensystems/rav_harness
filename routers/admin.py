@@ -3,15 +3,23 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from action_service import set_action_enabled
 from billing_service import list_action_rates, set_action_rate, set_user_credits
+from config import get_task_connections, set_task_connections
 from database import get_db
 from dependencies import require_admin
 from models import User, UserList
+from payment_service import get_payment_settings, set_payment_settings
 from schemas import (
     ActionRateResponse,
     ActionRateUpdate,
+    ActionToggleUpdate,
     AdminCreditUpdate,
     AdminUserResponse,
+    PaymentSettingsResponse,
+    PaymentSettingsUpdate,
+    TaskConnectionsResponse,
+    TaskConnectionsUpdate,
 )
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -91,3 +99,38 @@ def admin_update_billing(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     catalog = {item["task_type"]: item for item in list_action_rates(db)}
     return ActionRateResponse(**catalog[payload.task_type])
+
+
+@router.get("/connections", response_model=TaskConnectionsResponse)
+def admin_get_connections(admin: User = Depends(require_admin)):
+    return TaskConnectionsResponse(connections=get_task_connections())
+
+
+@router.put("/connections", response_model=TaskConnectionsResponse)
+def admin_set_connections(payload: TaskConnectionsUpdate, admin: User = Depends(require_admin)):
+    return TaskConnectionsResponse(connections=set_task_connections(payload.connections))
+
+
+@router.put("/actions", response_model=ActionRateResponse)
+def admin_set_action_enabled(
+    payload: ActionToggleUpdate,
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    try:
+        set_action_enabled(db, payload.task_type, payload.enabled)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    catalog = {item["task_type"]: item for item in list_action_rates(db)}
+    return ActionRateResponse(**catalog[payload.task_type])
+
+
+@router.get("/payments", response_model=PaymentSettingsResponse)
+def admin_get_payments(admin: User = Depends(require_admin)):
+    return PaymentSettingsResponse(**get_payment_settings())
+
+
+@router.put("/payments", response_model=PaymentSettingsResponse)
+def admin_set_payments(payload: PaymentSettingsUpdate, admin: User = Depends(require_admin)):
+    updated = set_payment_settings(payload.model_dump(exclude_unset=True))
+    return PaymentSettingsResponse(**updated)

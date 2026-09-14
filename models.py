@@ -122,6 +122,14 @@ class ActionRate(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
+class ActionToggle(Base):
+    __tablename__ = "action_toggles"
+
+    task_type: Mapped[str] = mapped_column(String(64), primary_key=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
 class CreditLedger(Base):
     __tablename__ = "credit_ledger"
 

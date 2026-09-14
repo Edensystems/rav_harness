@@ -33,6 +33,29 @@ def test_free_action_is_not_billable(client, auth_headers):
     rates = {item["task_type"]: item for item in resp.json()["rates"]}
     assert rates["balance"]["billable"] is False
     assert rates["balance"]["rate"] == 0
+    assert rates["streak"]["billable"] is False
+    assert rates["streak"]["rate"] == 0
+    assert rates["streak"]["label"] == "Check Streaks"
+
+
+def test_streak_task_starts_with_list_and_password_only(client, auth_headers, monkeypatch):
+    import server
+
+    monkeypatch.setattr(server, "run_automation_engine", lambda *args, **kwargs: None)
+    resp = client.post(
+        "/api/start_task",
+        headers=auth_headers,
+        json={
+            "task_type": "streak",
+            "target_numbers": ["254700000000"],
+            "target_password": "secret",
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["job_id"]
+    assert "streak_output_" in body["output_filename"]
+    assert body["billable"] is False
 
 
 def test_admin_can_update_claim_rate_and_grant_credits(client, db_session, device_headers):

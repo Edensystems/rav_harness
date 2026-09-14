@@ -24,6 +24,6 @@ def get_db():
 
 
 def init_db():
-    from models import ActionRate, CreditLedger, ListItem, TaskOutput, User, UserList, UserSession  # noqa: F401
+    from models import ActionRate, ActionToggle, CreditLedger, ListItem, TaskOutput, User, UserList, UserSession  # noqa: F401
 
     Base.metadata.create_all(bind=engine)

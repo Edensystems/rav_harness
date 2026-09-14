@@ -11,6 +11,7 @@ from client_auth_ui import AuthScreen
 from client_device import get_device_id, get_device_name
 from client_dashboard import DashboardBuilder
 from client_config import load_automation_identity, load_server_url
+from client_payments_ui import AddCreditsDialog
 
 SERVER_URL = load_server_url()
 
@@ -539,6 +540,9 @@ class ClientApp:
     def open_admin_dialog(self):
         AdminBillingDialog(self.root, self)
 
+    def open_add_credits(self):
+        AddCreditsDialog(self.root, self)
+
     def current_credits(self) -> float:
         try:
             return float((self.user or {}).get("credits") or 0)
@@ -555,6 +559,12 @@ class ClientApp:
     def is_billable(self, task_type: str) -> bool:
         item = self.billing_rates.get(task_type) or {}
         return bool(item.get("billable")) or self.action_rate(task_type) > 0
+
+    def is_action_enabled(self, task_type: str) -> bool:
+        item = self.billing_rates.get(task_type)
+        if not item:
+            return True
+        return bool(item.get("enabled", True))
 
     def set_credits(self, credits) -> None:
         if self.user is None:
@@ -605,18 +615,16 @@ class ClientApp:
             messagebox.showerror("Validation Error", f"Share/Booking Code is required for '{task_type}'.")
             return None
 
+        if task_type == "withdrawal" and not amount:
+            messagebox.showerror("Validation Error", "Amount is required for withdrawal.")
+            return None
+
         if not use_total_balance and task_type in ["bet", "virtual_bet", "app_bonus", "rollover", "claim"] and not amount:
             messagebox.showerror(
                 "Validation Error",
                 "Bet Amount is required when using 'Manual Input Choice'.",
             )
             return None
-
-        try:
-            connections = int(self.connections_entry.get())
-        except ValueError:
-            messagebox.showwarning("Warning", "Invalid connection value. Defaulting to 3.")
-            connections = 3
 
         dedupe_result = self._refresh_input_file_stats(notify=False)
         if dedupe_result is None:
@@ -659,13 +667,20 @@ class ClientApp:
             "amount": amount,
             "use_bonus": self.balance_mode_var.get() == "bonus",
             "use_total_balance": use_total_balance,
-            "connections": connections,
             "output_filename": output_filename,
+            "bet_id": self.bet_id_entry.get().strip() if hasattr(self, "bet_id_entry") else "",
         }
 
     def start_job(self, task_type):
         if self.is_running:
             self.log("A task is already in progress.")
+            return
+
+        if not self.is_action_enabled(task_type):
+            messagebox.showerror(
+                "Action disabled",
+                f"'{task_type}' is currently disabled by the server.",
+            )
             return
 
         if self.is_billable(task_type):
@@ -704,7 +719,14 @@ class ClientApp:
                 data = resp.json()
                 self.current_job_id = data["job_id"]
                 output_name = data.get("output_filename", "N/A")
-                self.root.after(0, lambda name=output_name: self.log(f"Job started. Output: {name}"))
+                workers = data.get("connections")
+                self.root.after(
+                    0,
+                    lambda name=output_name, count=workers: self.log(
+                        f"Job started. Output: {name}"
+                        + (f". Server connections: {count}" if count else "")
+                    ),
+                )
                 self.root.after(0, self.monitor_job)
             elif resp.status_code in (401, 403):
                 auth_detail = resp.json().get("detail", resp.text)
@@ -713,6 +735,11 @@ class ClientApp:
             elif resp.status_code == 402:
                 detail = resp.json().get("detail", resp.text) if resp.text else "Not enough credits for this action."
                 self.root.after(0, lambda msg=detail: messagebox.showerror("Credits required", msg))
+                self.root.after(0, lambda: self.set_ui_state(False))
+                self.root.after(0, self.refresh_billing)
+            elif resp.status_code == 423:
+                detail = resp.json().get("detail", resp.text) if resp.text else "This action is currently disabled by the server."
+                self.root.after(0, lambda msg=detail: messagebox.showerror("Action disabled", msg))
                 self.root.after(0, lambda: self.set_ui_state(False))
                 self.root.after(0, self.refresh_billing)
             else:
