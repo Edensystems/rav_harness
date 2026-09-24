@@ -670,6 +670,24 @@ def _place_single_rollover_bet(
         log_func(f"Error during single rollover bet for {url}: {e}")
 
 
+def _get_streak_details(auth_details: dict, log_func):
+    try:
+        streak_url = "https://odibets.com:443/pxy2/streaks"
+        headers = {
+            "Authorization": f"Bearer {auth_details['access_token']}",
+            "User-Agent": auth_details["ua"],
+            "Accept": "application/json, text/plain, */*",
+            "Content-Type": "application/json",
+            "Referer": "https://odibets.com/account",
+        }
+        resp = requests.get(streak_url, headers=headers, cookies=auth_details["cookies"],           timeout=TIMEOUT)                                
+        resp.raise_for_status()
+        streak_data = resp.json()           
+        return streak_data
+    except Exception as e:
+        log_func(f"Error occurred while fetching streak details for {auth_details.get('user_id', 'Unknown')}: {e}")
+        return None
+
 def process_single_user(
     target_number: str,
     payload: TaskPayload,
@@ -766,128 +784,39 @@ def process_single_user(
 
             _write_output(output_filename, result_line)
         elif task_type == "streak":
-            selections_url = "https://odibets.com:443/pxy2/streaks"
-            bet_headers = {
-                "Authorization": f"Bearer {auth_details['access_token']}",
-                "User-Agent": auth_details["ua"],
-                "Accept": "application/json, text/plain, */*",
-                "Content-Type": "application/json",
-                "Referer": "https://odibets.com/account",
-            }
-            resp_selections = requests.get(
-                selections_url, headers=bet_headers, cookies=auth_details["cookies"], timeout=TIMEOUT
-            )
-            resp_selections.raise_for_status()
-            selections_data = resp_selections.json()
-
-            if selections_data.get("status_code") != 200:
-                error_msg = selections_data.get("message", "Could not retrieve streak")
-                log_func(f"FAILED (Streak): {target_number} | {error_msg}")
+            str_result = _get_streak_details(auth_details, log_func)
+            if str_result is None:
+                log_func(f"FAILED (Streak): {target_number} | Could not retrieve streak details")
                 return
-
-            selection = (selections_data.get("data") or {}).get("current_streak")
-            if selection is None:
-                log_func(f"FAILED (Streak): {target_number} | No streak available")
-                return
-
-            result_line = f"{target_number} Streak: {selection}\n"
-            log_func(f"SUCCESS (Streak): {target_number} | Streak: {selection}")
+            streak_data = str_result.get("data", {})
+            streak_count = streak_data.get("current_streak", 0)
+            
+            result_line = f"{target_number} Streak Count: {streak_count}\n"
+            log_func(f"INFO (Streak): {target_number} | Streak Count: {streak_count}")
             _write_output(output_filename, result_line)
-            if job is not None:
-                _apply_success_charge(job, task_type, target_number, log_func)
-    
-
 
         elif task_type == "claim_bonus":
-            selections_url = (
-                f"https://odibets.com:443/pxy/bets?code={payload.share_code}"
-                f"&ua={auth_details['ua']}&resource=bookingcode"
-            )
-            bet_headers = {
-                "Authorization": f"Bearer {auth_details['access_token']}",
-                "User-Agent": auth_details["ua"],
-                "Accept": "application/json, text/plain, */*",
-                "Content-Type": "application/json",
-                "Referer": "https://odibets.com/",
-            }
-            resp_selections = requests.get(
-                selections_url, headers=bet_headers, cookies=auth_details["cookies"], timeout=TIMEOUT
-            )
-            resp_selections.raise_for_status()
-            selections_data = resp_selections.json()
-
-            if selections_data.get("status_code") != 200:
-                error_msg = selections_data.get("message", "Could not retrieve selections from share code")
-                log_func(f"FAILED (Claim Bonus): {target_number} | {error_msg}")
+            
+            clmrslt = _get_streak_details(auth_details, log_func)
+            if clmrslt is None:
+                log_func(f"FAILED (Claim Bonus): {target_number} | Could not retrieve streak details")
                 return
-
-            selection = selections_data["data"]["selections"][0]["parent_match_id"]
-            burp0_cookies = {"odibetskenya": auth_details["cookies"].get("odibetskenya", "")}
-            burp0_headers = {
-                "Accept": "application/json, text/plain, */*",
-                "User-Agent": (
-                    "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/121.0.6167.101 Mobile Safari/537.36"
-                ),
-                "Content-Type": "application/json;charset=UTF-8",
-                "Origin": "https://odibets.com",
-                "X-Requested-With": "com.odibetsmini",
-                "Referer": "https://odibets.com/",
-            }
-            bet_url = "https://odibets.com:443/api/sb"
-            stake = _resolve_stake(data, payload) if payload.amount or payload.use_total_balance else 30.0
-            bet_payload = {
-                "m": 2,
-                "msisdn": target_number,
-                "pwd": payload.target_password,
-                "ref": "",
-                "s": [
-                    {
-                        "away_team": "Ra",
-                        "booking_code": "",
-                        "competition_id": "851",
-                        "e_block_id": "",
-                        "home_team": "Qa",
-                        "i": 0,
-                        "id": "fc5dfdacb07765c8ec45e4386c853507",
-                        "jp_expiry": "",
-                        "jp_id": "",
-                        "jp_week_id": "",
-                        "live": 0,
-                        "odd_value": "3.35",
-                        "outcome_id": "1",
-                        "outcome_name": "Qar",
-                        "parent_match_id": selection,
-                        "rebet": 0,
-                        "round_id": "",
-                        "specifiers": "",
-                        "sport_id": "1",
-                        "sportsbook": "sportsbook",
-                        "start_time": "2025-09-07 18:15:00",
-                        "status": 1,
-                        "sub_type_id": "1",
-                    }
-                ],
-                "stake": str(stake),
-            }
-
-            resp_bet = requests.post(
-                bet_url, headers=burp0_headers, cookies=burp0_cookies, json=bet_payload, timeout=TIMEOUT
-            )
-            resp_bet.raise_for_status()
-            bet_result = resp_bet.json()
-
-            if bet_result.get("status_code") == 200:
-                status_desc = bet_result.get("status_description", "Success")
-                result_line = f"{target_number}  {status_desc}\n"
-                log_func(f"SUCCESS (Claim Bonus): {target_number} | {status_desc}")
-                if job is not None:
-                    _apply_success_charge(job, task_type, target_number, log_func)
-            else:
-                error_msg = bet_result.get("status_description", "Unknown error")
-                result_line = f"{target_number} - Bet Failed: {error_msg}\n"
-                log_func(f"FAILED (Claim Bonus): {target_number} | {error_msg}")
-
+            existing_rewards = clmrslt.get("data", {}).get("unclaimed_rewards", [])
+            if not existing_rewards:
+                result_line = f"{target_number} Claim Bonus: No unclaimed rewards available\n"
+                log_func(f"INFO (Claim Bonus): {target_number} | No unclaimed rewards available")
+            else:       
+                for reward in existing_rewards:
+                    reward_id = reward.get("id")
+                    claim_url = "https://odibets.com:443/pxy2/streaks"
+                    claim_payload = {"id": reward_id}
+                    resp_claim = requests.post(
+                        claim_url, headers=bet_headers, cookies=auth_details["cookies"], json=claim_payload, timeout=TIMEOUT
+                    )
+                    claim_result = resp_claim.json()
+                    status_desc = claim_result.get("status_description", "Unknown")
+                    result_line = f"{target_number} Claim Bonus: {status_desc}\n"
+                    log_func(f"INFO (Claim Bonus): {target_number} | {status_desc}") 
             _write_output(output_filename, result_line)
 
         elif task_type == "virtual_bet":
@@ -984,132 +913,8 @@ def process_single_user(
             else:
                 log_func(f"INFO (Virtual Bet): No balanced market found for {target_number}")
 
-        elif task_type == "claim":
-            stake = _resolve_stake(data, payload)
-            virtual_headers = {
-                "Authorization": f"Bearer {auth_details['access_token']}",
-                "X-Odi-Key": auth_details["session_token"],
-                "User-Agent": auth_details["ua"],
-                "Accept": "application/json, text/plain, */*",
-                "Content-Type": "application/json",
-                "Referer": "https://odibets.com/odileague",
-                "Origin": "https://odibets.com",
-            }
-
-            periods_url = (
-                "https://odibets.com:443/pxy/virtuals?competition_id=1&tab=&period=&level=1"
-                "&platform=desktop&view=odileague&resource=virtuals"
-            )
-            resp_periods = requests.get(
-                periods_url, headers=virtual_headers, cookies=auth_details["cookies"], timeout=TIMEOUT
-            )
-            resp_periods.raise_for_status()
-            periods_data = resp_periods.json()
-
-            if periods_data.get("status_code") != 200:
-                log_func(f"FAILED (Claim): Could not get virtual periods for {target_number}")
-                return
-
-            period_time_str = periods_data["data"]["periods"][10]["start_time"]
-            formatted_time = datetime.strptime(period_time_str, "%Y-%m-%d %H:%M:%S").strftime("%Y-%m-%d+%H:%M:%S")
-
-            matches_url = (
-                f"https://odibets.com:443/pxy/virtuals?competition_id=1&period={formatted_time}"
-                f"&sub_type_id=TG25&level=4&platform=desktop&view=odileague&resource=virtuals"
-            )
-            resp_matches = requests.get(
-                matches_url, headers=virtual_headers, cookies=auth_details["cookies"], timeout=TIMEOUT
-            )
-            resp_matches.raise_for_status()
-            matches_data = resp_matches.json()
-
-            balanced_slip = _generate_balanced_gg_slip(matches_data["data"]["matches"])
-
-            if balanced_slip:
-                bet_url = "https://odibets.com:443/pxy/bet"
-                bet_payload = {
-                    "auto_oc": False,
-                    "bet_amount": float(stake),
-                    "id": "",
-                    "resource": "bet",
-                    "slip": [balanced_slip[0]],
-                    "sportsbook": "virtuals",
-                    "src": "bet",
-                    "ua": auth_details["ua"],
-                    "view": "odileague",
-                }
-
-                resp_bet = requests.post(
-                    bet_url, headers=virtual_headers, cookies=auth_details["cookies"], json=bet_payload, timeout=TIMEOUT
-                )
-                resp_bet.raise_for_status()
-                bet_result = resp_bet.json()
-
-                status_desc = bet_result.get("status_description", "Unknown virtual bet status")
-                result_line = f"{target_number} - Claim/Virtual Bet Status: {status_desc}\n"
-                log_func(f"INFO (Claim): {target_number} | {status_desc}")
-                _write_output(output_filename, result_line)
-                if job is not None and _looks_like_success(status_desc):
-                    _apply_success_charge(job, task_type, target_number, log_func)
-            else:
-                log_func(f"INFO (Claim): No balanced market found for {target_number}")
-
-        elif task_type == "app_bonus":
-            stake = _resolve_stake(data if data else {}, payload)
-            android_headers = {
-                "Authorization": f"Bearer {auth_details['access_token']}",
-                "X-Odi-Key": auth_details["session_token"],
-                "User-Agent": auth_details["ua"],
-                "Accept": "application/json, text/plain, */*",
-                "Content-Type": "application/json",
-                "Origin": "https://odibets.com",
-                "X-Requested-With": "com.odibetsmini",
-                "Referer": "https://odibets.com/",
-            }
-
-            selections_url = (
-                f"https://odibets.com:443/pxy/bets?code={payload.share_code}"
-                f"&ua={auth_details['ua']}&resource=bookingcode"
-            )
-            resp_selections = requests.get(
-                selections_url, headers=android_headers, cookies=auth_details["cookies"], timeout=TIMEOUT
-            )
-            resp_selections.raise_for_status()
-            selections_data = resp_selections.json()
-
-            if selections_data.get("status_code") != 200:
-                error_msg = selections_data.get("message", "Could not retrieve selections from share code")
-                log_func(f"FAILED (App Bonus): {target_number} | {error_msg}")
-                return
-
-            selections = selections_data["data"]["selections"]
-            betting_slip = _create_betting_slip(selections)
-
-            bet_url = "https://odibets.com:443/pxy/bet"
-            bet_payload = {
-                "auto_oc": False,
-                "bet_amount": float(stake),
-                "id": "",
-                "resource": "bet",
-                "slip": betting_slip,
-                "sportsbook": "sportsbook",
-                "src": "bet",
-                "ua": auth_details["ua"],
-                "view": "home",
-            }
-
-            resp_bet = requests.post(
-                bet_url, headers=android_headers, cookies=auth_details["cookies"], json=bet_payload, timeout=TIMEOUT
-            )
-            resp_bet.raise_for_status()
-            bet_result = resp_bet.json()
-
-            bet_status_desc = bet_result.get("status_description", "Unknown")
-            log_func(f"INFO (App Bonus Bet): {target_number} | {bet_status_desc}")
-            result_line = f"{target_number} - App Bonus: {bet_status_desc}\n"
-            _write_output(output_filename, result_line)
-            if job is not None and _looks_like_success(bet_status_desc):
-                _apply_success_charge(job, task_type, target_number, log_func)
+        
+        
 
         elif task_type == "withdrawal":
             stake = payload.amount
