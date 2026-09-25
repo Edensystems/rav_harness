@@ -65,7 +65,7 @@ OUTPUT_LOCK = threading.Lock()
 def _validate_task_payload(payload: TaskPayload):
     if not payload.target_numbers:
         raise HTTPException(status_code=400, detail="No target numbers provided")
-    if payload.task_type in {"bet", "app_bonus", "claim_bonus"} and not payload.share_code:
+    if payload.task_type in {"bet"} and not payload.share_code:
         raise HTTPException(status_code=400, detail=f"Share code required for '{payload.task_type}'")
     if payload.task_type == "withdrawal" and not payload.amount:
         raise HTTPException(status_code=400, detail="Amount required for 'withdrawal'")
@@ -185,17 +185,36 @@ def get_task_status(job_id: str, user: User = Depends(get_current_user)):
 
 @app.post("/api/stop_task/{job_id}")
 def stop_task(job_id: str, user: User = Depends(get_current_user)):
-    if job_id not in JOBS:
-        raise HTTPException(status_code=400, detail="Job not found")
-    if JOBS[job_id].get("owner_id") != str(user.id):
-        raise HTTPException(status_code=403, detail="Not authorized for this job")
-    if JOBS[job_id]["status"] == "running":
-        JOBS[job_id]["stop_event"].set()
-        with JOBS[job_id]["log_lock"]:
-            JOBS[job_id]["logs"].append(f"{datetime.now().strftime('%H:%M:%S')} - Stop signal received. Halting task...")
-        return {"message": "Stop signal sent"}
-    raise HTTPException(status_code=400, detail="Job not running or not found")
+    job = JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
 
+    if job.get("owner_id") != str(user.id):
+        raise HTTPException(status_code=403, detail="Not authorized for this job")
+
+    current_status = job.get("status")
+
+    # If the job is already finished, canceled, or failed, treat stop as a no-op success
+    if current_status in ("completed", "stopped", "failed"):
+        return {"message": f"Job is already in '{current_status}' state", "status": current_status}
+
+    if current_status == "running":
+        # Signal the stop event safely
+        stop_event = job.get("stop_event")
+        if stop_event:
+            stop_event.set()
+
+        job["status"] = "stopping"
+
+        log_lock = job.get("log_lock")
+        if log_lock:
+            with log_lock:
+                job["logs"].append(
+                    f"{datetime.now().strftime('%H:%M:%S')} - Stop signal received. Halting task..."
+                )
+        return {"message": "Stop signal sent successfully", "status": "stopping"}
+
+    return {"message": f"Job in state '{current_status}' cannot be stopped", "status": current_status}
 
 def _apply_success_charge(job: dict, task_type: str, target_number: str, log_func) -> bool:
     rate = float(job.get("billing_rate") or 0)
@@ -796,6 +815,11 @@ def process_single_user(
             _write_output(output_filename, result_line)
 
         elif task_type == "claim_bonus":
+            bet_headers = {
+                "Authorization": f"Bearer {auth_details['access_token']}",
+                "User-Agent": auth_details["ua"],
+                "Content-Type": "application/json",
+            }
             
             clmrslt = _get_streak_details(auth_details, log_func)
             if clmrslt is None:
